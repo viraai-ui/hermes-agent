@@ -130,23 +130,28 @@ def check_for_updates() -> Optional[int]:
     Does a ``git fetch`` at most once every 6 hours (cached to
     ``~/.hermes/.update_check``).  Returns the number of commits behind,
     or ``None`` if the check fails or isn't applicable.
+
+    Cache entries are tied to the current HEAD hash so an old positive
+    result cannot survive a successful ``hermes update`` or branch switch.
     """
     hermes_home = get_hermes_home()
-    repo_dir = hermes_home / "hermes-agent"
     cache_file = hermes_home / ".update_check"
-
-    # Must be a git repo — fall back to project root for dev installs
-    if not (repo_dir / ".git").exists():
-        repo_dir = Path(__file__).parent.parent.resolve()
-    if not (repo_dir / ".git").exists():
+    repo_dir = _resolve_repo_dir()
+    if repo_dir is None:
         return None
+
+    current_head = _git_short_hash(repo_dir, "HEAD")
 
     # Read cache
     now = time.time()
     try:
         if cache_file.exists():
             cached = json.loads(cache_file.read_text())
-            if now - cached.get("ts", 0) < _UPDATE_CHECK_CACHE_SECONDS:
+            cache_is_fresh = now - cached.get("ts", 0) < _UPDATE_CHECK_CACHE_SECONDS
+            cache_matches_head = (
+                cached.get("head") == current_head and current_head is not None
+            )
+            if cache_is_fresh and cache_matches_head:
                 return cached.get("behind")
     except Exception:
         pass
@@ -177,7 +182,9 @@ def check_for_updates() -> Optional[int]:
 
     # Write cache
     try:
-        cache_file.write_text(json.dumps({"ts": now, "behind": behind}))
+        cache_file.write_text(
+            json.dumps({"ts": now, "behind": behind, "head": current_head})
+        )
     except Exception:
         pass
 
@@ -185,12 +192,19 @@ def check_for_updates() -> Optional[int]:
 
 
 def _resolve_repo_dir() -> Optional[Path]:
-    """Return the active Hermes git checkout, or None if this isn't a git install."""
+    """Return the git checkout backing the currently running Hermes code.
+
+    Prefer the repo containing this module so update checks track the actual
+    installation in use. Fall back to ``<HERMES_HOME>/hermes-agent`` only for
+    layouts where the running code is not itself inside a git checkout.
+    """
+    current_repo = Path(__file__).parent.parent.resolve()
+    if (current_repo / ".git").exists():
+        return current_repo
+
     hermes_home = get_hermes_home()
-    repo_dir = hermes_home / "hermes-agent"
-    if not (repo_dir / ".git").exists():
-        repo_dir = Path(__file__).parent.parent.resolve()
-    return repo_dir if (repo_dir / ".git").exists() else None
+    profile_repo = hermes_home / "hermes-agent"
+    return profile_repo if (profile_repo / ".git").exists() else None
 
 
 def _git_short_hash(repo_dir: Path, rev: str) -> Optional[str]:
